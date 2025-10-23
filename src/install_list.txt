@@ -1,0 +1,16 @@
+* 처음 세팅에서 진행할 명령어들
+py -3.10 -m venv venv
+venv\Scripts\activate
+python -m pip install -U pip
+
+pip install numpy opencv-python Pillow tensorflow libsumo sumolib tk
+
+
+* GPT에게 설명할 때 필요한 정보
+libsumo를 기반으로 sumo로 구현한 차량 네트워크 시뮬레이터
+src 폴더 내부: 시뮬레이터 핵심 파일들
+src 폴더 외부: 예제 파일들과 제안 방안들
+
+요청 사항: 
+
+완성된 프로젝트는 내가 다운로드 받을 수 있도록 압축파일로 제공해줘.

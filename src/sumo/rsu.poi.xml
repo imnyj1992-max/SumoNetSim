@@ -1,0 +1,27 @@
+<additional>
+  <poi id="N7" x="1200.0" y="1200.0" type="RSU" color="1,0,0"/>
+  <poi id="N8" x="1200.0" y="3600.0" type="RSU" color="1,0,0"/>
+  <poi id="N9" x="1200.0" y="6000.0" type="RSU" color="1,0,0"/>
+  <poi id="N10" x="1200.0" y="8400.0" type="RSU" color="1,0,0"/>
+  <poi id="N11" x="1200.0" y="10800.0" type="RSU" color="1,0,0"/>
+  <poi id="N14" x="3600.0" y="1200.0" type="RSU" color="1,0,0"/>
+  <poi id="N15" x="3600.0" y="3600.0" type="RSU" color="1,0,0"/>
+  <poi id="N16" x="3600.0" y="6000.0" type="RSU" color="1,0,0"/>
+  <poi id="N17" x="3600.0" y="8400.0" type="RSU" color="1,0,0"/>
+  <poi id="N18" x="3600.0" y="10800.0" type="RSU" color="1,0,0"/>
+  <poi id="N21" x="6000.0" y="1200.0" type="RSU" color="1,0,0"/>
+  <poi id="N22" x="6000.0" y="3600.0" type="RSU" color="1,0,0"/>
+  <poi id="N23" x="6000.0" y="6000.0" type="RSU" color="1,0,0"/>
+  <poi id="N24" x="6000.0" y="8400.0" type="RSU" color="1,0,0"/>
+  <poi id="N25" x="6000.0" y="10800.0" type="RSU" color="1,0,0"/>
+  <poi id="N28" x="8400.0" y="1200.0" type="RSU" color="1,0,0"/>
+  <poi id="N29" x="8400.0" y="3600.0" type="RSU" color="1,0,0"/>
+  <poi id="N30" x="8400.0" y="6000.0" type="RSU" color="1,0,0"/>
+  <poi id="N31" x="8400.0" y="8400.0" type="RSU" color="1,0,0"/>
+  <poi id="N32" x="8400.0" y="10800.0" type="RSU" color="1,0,0"/>
+  <poi id="N35" x="10800.0" y="1200.0" type="RSU" color="1,0,0"/>
+  <poi id="N36" x="10800.0" y="3600.0" type="RSU" color="1,0,0"/>
+  <poi id="N37" x="10800.0" y="6000.0" type="RSU" color="1,0,0"/>
+  <poi id="N38" x="10800.0" y="8400.0" type="RSU" color="1,0,0"/>
+  <poi id="N39" x="10800.0" y="10800.0" type="RSU" color="1,0,0"/>
+</additional>
