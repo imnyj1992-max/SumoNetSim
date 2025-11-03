@@ -1,5 +1,6 @@
 from __future__ import annotations
 import heapq, itertools, os, sumolib
+import random
 os.environ.setdefault("SUMO_USE_LIBSUMO", "1")
 import libsumo as sumo
 from math import hypot
@@ -13,7 +14,24 @@ import src.sumo.make_sumo_set as sumo_set
 import cv2, time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-import builtins, traceback
+import traceback
+
+_libsumo_traci_exc = getattr(sumo, "TraCIException", Exception)
+_traci_base_candidates = [cls for cls in (_libsumo_traci_exc,) if isinstance(cls, type)]
+try:  # pragma: no cover - optional dependency
+    from traci.exceptions import FatalTraCIError as _TraCIFatalError, TraCIException as _TraciException
+except Exception:
+    _traci_fatal_candidates = list(_traci_base_candidates)
+else:
+    _traci_fatal_candidates = [cls for cls in (_TraCIFatalError,) if isinstance(cls, type)]
+    if isinstance(_TraciException, type) and _TraciException not in _traci_base_candidates:
+        _traci_base_candidates.append(_TraciException)
+    for cls in (_libsumo_traci_exc,):
+        if isinstance(cls, type) and cls not in _traci_fatal_candidates:
+            _traci_fatal_candidates.append(cls)
+TRACI_BASE_ERRORS = tuple(_traci_base_candidates) or (Exception,)
+TRACI_FATAL_ERRORS = tuple(_traci_fatal_candidates) or TRACI_BASE_ERRORS
+TRACI_FATAL_MARKERS = ("Fatal TraCI Error", "connection closed", "connection reset", "SUMO terminated")
 
 def _node_alive(sim, node) -> bool:
     try: return any(n is node for n in getattr(sim, "nodes", []))
@@ -140,6 +158,13 @@ class Node:
         assert self.sim is not None and pkt.dst.sim is not None, "양쪽 노드가 시뮬레이터에 등록되어 있어야 함."
         arrival = self.sim.current_time + 0
         self.sim.schedule_event(arrival, pkt.dst.receive_packet, pkt)
+    
+    def reset_runtime(self) -> None:
+        self.prev_pos = self.pos
+        self.frag_buffers.clear()
+        self.dwell_queue.clear()
+        self.speed_queue.clear()
+        self._stream_sessions.clear()
 
     def _send_streaming(self, pkt: Packet, medium: str) -> None:
         assert self.sim is not None
@@ -287,7 +312,7 @@ class Node:
         if self.sim is None: return
         for node in self.sim.nodes:
             if node is self: continue
-            max_range = builtins.max(getattr(self, "comm_range", 0.0), getattr(node, "comm_range", 0.0))
+            max_range = max(getattr(self, "comm_range", 0.0), getattr(node, "comm_range", 0.0))
             if max_range <= 0.0: continue
             if self.distance_to(node) <= max_range:
                 pkt = Packet(pkt_type=pkt_type, src=self, dst=node, payload=payload, size_bytes=size_bytes)
@@ -299,7 +324,7 @@ class Node:
         for node in self.sim.nodes:
             if not callable(getattr(node, handler_name, None)): continue
             if node is self: continue
-            max_range = builtins.max(getattr(self, "comm_range", 0.0), getattr(node, "comm_range", 0.0))
+            max_range = max(getattr(self, "comm_range", 0.0), getattr(node, "comm_range", 0.0))
             if max_range <= 0.0: continue
             if self.distance_to(node) <= max_range:
                 pkt = Packet(pkt_type=pkt_type, src=self, dst=node, payload=payload, size_bytes=size_bytes)
@@ -323,7 +348,11 @@ class Node:
         for node in self.sim.nodes:
             if node is self: continue
             if getattr(node, "is_rsu", False) or getattr(node, "is_server", False): continue
-            max_range = builtins.max(getattr(self, "comm_range", 0.0), getattr(node, "comm_range", 0.0))
+            max_range = 0.0
+            if getattr(self, "comm_range", 0.0) > getattr(node, "comm_range", 0.0):
+                max_range = getattr(self, "comm_range", 0.0)
+            else:
+                max_range = getattr(node, "comm_range", 0.0)
             if max_range <= 0.0: continue
             if self.distance_to(node) <= max_range:
                 nearby.append(node.id)
@@ -518,6 +547,8 @@ class EventSimulator:
         self._counter = itertools.count()
         self.nodes: List[Node] = []
         self._frag_counter = itertools.count(1)
+        self._stopped: bool = False
+        self._stop_reason: Optional[str] = None
 
     def add_node(self, node: Node) -> None:
         node.sim = self; self.nodes.append(node)
@@ -527,7 +558,7 @@ class EventSimulator:
     def get_next_frag_id(self) -> int: return next(self._frag_counter)
 
     def schedule_event(self, time: float, handler: Callable, *args: Any, **kwargs: Any) -> None:
-        if time > self.max_time: return
+        if time > self.max_time or self._stopped: return
         count = next(self._counter)
         heapq.heappush(self._event_queue, (time, count, Event(time, handler, *args, **kwargs)))
 
@@ -535,21 +566,33 @@ class EventSimulator:
         next_time = round(self.current_time + self.step ,6)
         self.schedule_event(next_time, self._step_event)
 
-    def run(self) -> None:
-        self.schedule_event(0.0, self._step_event)
-        while self._event_queue:
+    def stop(self, reason: Optional[str] = None) -> None:
+        if self._stopped: return
+        self._stopped = True
+        self._stop_reason = reason
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stopped
+    
+    def run(self) -> None:        
+        self._stopped = False
+        self._stop_reason = None
+        if not self._event_queue:
+            self.schedule_event(0.0, self._step_event)
+        while self._event_queue and not self._stopped:
             try:
+                time.sleep(0.001)
                 t, _, event = heapq.heappop(self._event_queue)
+                time.sleep(0.001)
                 if t > self.max_time: break
                 if b_step_log: print(f"[{t:.3f}s] ▶ 이벤트 발생: {event.handler.__name__}({event.args}, {event.kwargs})")
                 self.current_time = t
                 event.handler(*event.args, **event.kwargs)
-                if video_enabled and recorder is not None:
-                    recorder.record_frame(vehicles, rsu_list, self.current_time)
-                    
-                time.sleep(0.005)
+                if video_enabled and recorder is not None: recorder.record_frame(vehicles, rsu_list, self.current_time)
+                time.sleep(0.001)
             except Exception as e: print(f"Error007: {e}"); traceback.print_exc()
-        print("시뮬레이션 종료")
+        if self._stop_reason: print(f"시뮬레이션 강제 중단: {self._stop_reason}")
 
 # =====================================================================
 RSU_LIST: List[RSUNode] = []
@@ -648,8 +691,26 @@ VehicleClass = None
 RSUClass = None
 st = 0
 
-def InitSumoNetSim(VehicleClass: type = None, RSUClass: type = None,) -> None:
-    launch_simulation()
+def pre_define() -> None:
+    global MODE, MAX_EPISODE, b_reroute, b_step_log
+    global video_enabled
+    sumo_set.RSU_RANGE = 800.0
+    MAX_EPISODE = 1
+    sumo_set.MAX_STEPS = 3600.0
+    sumo_set.OUTAGE_ZONE = 800.0
+    sumo_set.NUM_BLOCKS = 5
+    sumo_set.AV_SPEED = random.uniform(20.0, 60.0)
+    sumo_set.DENSITY = random.uniform(5.0, 20.0)
+    sumo_set.P_GEN = (sumo_set.DENSITY * sumo_set.SPEED) / 3600.0
+    b_reroute = False
+    b_step_log = True
+    video_enabled = False
+
+def InitSumoNetSim(VehicleClass: type = None, RSUClass: type = None, mode=0) -> None:
+    if mode == 0:
+        launch_simulation()
+    else:
+        pre_define()
     global MODE, CFG_DIR, sumo_cmd
     VehicleClass = VehicleClass or VehicleNode
     RSUClass = RSUClass or RSUNode
@@ -734,7 +795,11 @@ class SumoNetSim():
                 "--collision.action", "warn",
             ]
             cmd = base_args
-            sumo.start(cmd)
+            try:
+                sumo.start(cmd)
+            except Exception as e:
+                print(f"ErrorTRAC: {e}"); traceback.print_exc()
+                return
 
             if video_enabled:
                 out_name = f"simulation_episode{ep+1}.mp4" if MAX_EPISODE > 1 else "simulation.mp4"
@@ -744,8 +809,9 @@ class SumoNetSim():
 
             def step_event() -> None:
                 try:
-                    time.sleep(0.005)
+                    time.sleep(0.001)
                     sumo.simulationStep()
+                    time.sleep(0.001)
                     self.sim.current_time = sumo.simulation.getTime()
                     current_ids = set(sumo.vehicle.getIDList())
                     
@@ -780,8 +846,25 @@ class SumoNetSim():
                     
                     for node in self.sim.nodes:
                         node.update_dwell(self.sim.current_time)
-                except Exception as e: print(f"Error011: {e}"); traceback.print_exc()
-                finally: self.sim.schedule_event(self.sim.current_time + self.sim.step, step_event)
+                except TRACI_FATAL_ERRORS as e:
+                    msg = f"Fatal TraCI error: {str(e)}"
+                    print(msg)
+                    self.sim.stop(msg)
+                    return
+                except TRACI_BASE_ERRORS as e:
+                    text = str(e)
+                    if any(marker in text for marker in TRACI_FATAL_MARKERS):
+                        msg = f"Fatal TraCI error: {text}"
+                        print(msg)
+                        self.sim.stop(msg)
+                        return
+                    print(f"TraCI exception: {text}")
+                    traceback.print_exc()
+                except Exception as e:
+                    print(f"Error011: {e}")
+                    traceback.print_exc()
+                finally:
+                    if not self.sim.is_stopped: self.sim.schedule_event(self.sim.current_time + self.sim.step, step_event)
 
             self.sim._step_event = step_event
             self.sim.schedule_event(0.0, self.sim._step_event)
@@ -844,6 +927,7 @@ def GetNextRSU(vehicle_id: str) -> Optional[str]:
         edge_id = route_edges[pos]
         edge = _network_cache.getEdge(edge_id)
         nid = edge.getToNode().getID()
+        if nid not in rsu_dict: continue
         rsu_x, rsu_y = rsu_dict[nid].pos
         if (rsu_x - veh_x) ** 2 + (rsu_y - veh_y) ** 2 <= rsu_dict[nid].comm_range ** 2:
             return _network_cache.getEdge(route_edges[pos+1]).getToNode().getID()
@@ -851,14 +935,152 @@ def GetNextRSU(vehicle_id: str) -> Optional[str]:
             return nid
     return None
 
-def GetSignalState(rsu_id: str) -> float:
+# def GetSignalState(rsu_id: str) -> float:
+#     try:
+#         state_str = sumo.trafficlight.getRedYellowGreenState(rsu_id)
+#         if not state_str: return 0.0
+#         c = state_str[0]
+#         mapping = {'R': 1.0, 'r': 1.0, 'Y': 2.0, 'y': 2.0, 'G': 3.0, 'g': 3.0}
+#         return mapping.get(c, 0.0)
+#     except Exception as e: print(f"Error021: {e}"); traceback.print_exc(); return 0.0
+
+def _map_tls_state_char(ch: str) -> float:
+    mapping = {'R': 1.0, 'r': 1.0, 'Y': 2.0, 'y': 2.0, 'G': 3.0, 'g': 3.0}
+    return mapping.get(ch, 0.0)
+
+
+def _match_tls_index_for_lane(rsu_id: str, lane_id: str) -> tuple[Optional[int], Optional[str]]:
     try:
-        state_str = sumo.trafficlight.getRedYellowGreenState(rsu_id)
-        if not state_str: return 0.0
-        c = state_str[0]
-        mapping = {'R': 1.0, 'r': 1.0, 'Y': 2.0, 'y': 2.0, 'G': 3.0, 'g': 3.0}
-        return mapping.get(c, 0.0)
-    except Exception as e: print(f"Error021: {e}"); traceback.print_exc(); return 0.0
+        controlled = sumo.trafficlight.getControlledLinks(rsu_id)
+    except Exception as e:
+        print(f"Error021a: {e}")
+        traceback.print_exc()
+        return None, None
+    for idx, links in enumerate(controlled):
+        for link in links:
+            if not link:
+                continue
+            incoming = link[0] if len(link) > 0 else None
+            outgoing = link[1] if len(link) > 1 else None
+            via = link[2] if len(link) > 2 else None
+            if lane_id == incoming:
+                return idx, "incoming"
+            if lane_id == via or lane_id == outgoing:
+                # via lane indicates the internal connector while outgoing is the lane after the junction
+                return idx, "outgoing"
+    return None, None
+
+def _get_route_based_tls_index(rsu_id: str, vehicle_id: str) -> Optional[int]:
+    """
+    차량의 경로를 분석해 주어진 RSU 접근 시에 사용할 신호 그룹 인덱스를 추정합니다.
+    현재 위치 이후 경로에서 RSU의 incoming edge가 등장하면 해당 인덱스를 반환합니다.
+    """
+    try:
+        route_edges = list(sumo.vehicle.getRoute(vehicle_id))
+    except Exception:
+        return None
+    # 현재 차량이 위치한 도로의 인덱스를 구함
+    try:
+        current_edge = sumo.vehicle.getRoadID(vehicle_id)
+        pos = route_edges.index(current_edge) if current_edge in route_edges else 0
+    except Exception:
+        pos = 0
+    # RSU가 제어하는 각 링크를 조사해 경로에 포함된 incoming edge를 찾음
+    try:
+        controlled = sumo.trafficlight.getControlledLinks(rsu_id)
+    except Exception:
+        return None
+    for idx, links in enumerate(controlled):
+        for link in links:
+            if not link:
+                continue
+            incoming_lane = link[0]
+            if not incoming_lane:
+                continue
+            try:
+                incoming_edge = sumo.lane.getEdgeID(incoming_lane)
+            except Exception:
+                continue
+            if incoming_edge in route_edges:
+                in_pos = route_edges.index(incoming_edge)
+                if in_pos >= pos:
+                    return idx
+    return None
+
+
+def GetSignalState(
+    rsu_id: Optional[str],
+    vehicle_id: Optional[str] = None,
+    dir_flag: Optional[int] = None,
+    comm_range: float = 800.0,
+) -> float:
+    """
+    RSU가 차량의 통신 범위 내에 있으면 즉시 다음 신호 정보를 사용하고,
+    그렇지 않으면 경로 기반으로 적절한 신호 그룹을 찾아 반환합니다.
+    dir_flag == -1 일 경우 이미 교차로를 지난 것으로 간주해 -2.0을 반환합니다.
+    """
+    try:
+        if not rsu_id:
+            return 0.0
+        if dir_flag == -1:
+            return -2.0
+        if vehicle_id:
+            try:
+                tls_info = sumo.vehicle.getNextTLS(vehicle_id)
+            except Exception:
+                tls_info = []
+            for tls_id, tls_index, dist, state in tls_info:
+                if tls_id != rsu_id:
+                    continue
+                # 통신 범위 이내라면 TraCI가 제공하는 신호값을 사용
+                try:
+                    if dist is None or float(dist) <= comm_range:
+                        return _map_tls_state_char(state)
+                except Exception:
+                    return _map_tls_state_char(state)
+                # 범위를 벗어나면 다음 RSU로 간주해 인덱스 추정
+                try:
+                    state_str = sumo.trafficlight.getRedYellowGreenState(rsu_id)
+                except Exception:
+                    state_str = ''
+                if state_str:
+                    if tls_index is not None and 0 <= tls_index < len(state_str):
+                        return _map_tls_state_char(state_str[tls_index])
+                    idx_route = _get_route_based_tls_index(rsu_id, vehicle_id)
+                    if idx_route is not None and idx_route < len(state_str):
+                        return _map_tls_state_char(state_str[idx_route])
+                    return _map_tls_state_char(state_str[0])
+                return 0.0
+            # nextTLS에 나타나지 않은 경우 경로 또는 현재 차선으로 인덱스를 추정
+            try:
+                state_str = sumo.trafficlight.getRedYellowGreenState(rsu_id)
+            except Exception:
+                state_str = ''
+            if state_str:
+                idx_route = _get_route_based_tls_index(rsu_id, vehicle_id)
+                if idx_route is not None and idx_route < len(state_str):
+                    return _map_tls_state_char(state_str[idx_route])
+                try:
+                    lane_id = sumo.vehicle.getLaneID(vehicle_id)
+                except Exception:
+                    lane_id = None
+                if lane_id:
+                    idx, _role = _match_tls_index_for_lane(rsu_id, lane_id)
+                    if idx is not None and idx < len(state_str):
+                        return _map_tls_state_char(state_str[idx])
+                return _map_tls_state_char(state_str[0])
+        # vehicle_id가 없으면 RSU의 첫 신호만 반환
+        try:
+            state_str = sumo.trafficlight.getRedYellowGreenState(rsu_id)
+        except Exception:
+            state_str = ''
+        if state_str:
+            return _map_tls_state_char(state_str[0])
+        return 0.0
+    except Exception as e:
+        print(f"Error021: {e}")
+        traceback.print_exc()
+        return 0.0
 
 def GetSignalChangeTime(rsu_id: str) -> float:
     try:
