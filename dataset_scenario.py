@@ -79,6 +79,8 @@ class VehicleNode(net.Node):
         self.sim.schedule_event(self.sim.current_time + self.sim.step, self.check_range)
 
     def check_range(self) -> None:
+        if self.sim is None or self.cur_rsu is None:
+            return
         if self.cur_rsu is None:
             return
         dist = self.distance_to(self.cur_rsu)
@@ -162,13 +164,21 @@ class RSUNode(net.Node):
         self.buffer.append(record)
         if self.b_log: print(f"{self.id}+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         if len(self.buffer) >= self.buffer_size:
-            self._flush_buffer()
+            self.flush_buffer()
 
-    def _flush_buffer(self) -> None:
+    def _ensure_output_dir(self) -> str:
+        data_dir = os.path.join(os.getcwd(), "data")
+        os.makedirs(data_dir, exist_ok=True)
+        return data_dir
+
+    def flush_buffer(self, force: bool = False) -> None:
         if not self.buffer:
             return
+        if not force and len(self.buffer) < self.buffer_size:
+            return
+        data_dir = self._ensure_output_dir()
         fname = f"rsu_{self.id}.csv"
-        file_path = os.path.join(os.getcwd(), "data", fname)
+        file_path = os.path.join(data_dir, fname)
         file_exists = os.path.exists(file_path)
         with open(file_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -187,6 +197,16 @@ class RSUNode(net.Node):
                 row.append(rec['targets'].get('exit_time'))
                 writer.writerow(row)
         self.buffer = []
+
+    def reset_runtime(self) -> None:
+        try:
+            self.flush_buffer(force=True)
+        except Exception as flush_err:
+            print(f"Error flushing buffer for RSU {self.id}: {flush_err}")
+        super().reset_runtime()
+        self.pending_records.clear()
+        self.buffer = []
+        self._dwell_map.clear()
 
     def _compute_features(self, veh_node: net.Node) -> Dict[str, Any]:
         features: Dict[str, Any] = {}
@@ -262,8 +282,12 @@ class RSUNode(net.Node):
             features['v_n_a'] = next_rsu.GetAvgSpeed()
         else:
             features['v_n_a'] = -1.0
-        features['tls_c'] = self._map_signal_state(net.GetSignalState(self.id))
-        features['tls_n'] = self._map_signal_state(net.GetSignalState(next_rsu_id)) if next_rsu_id else 0
+        #features['tls_c'] = self._map_signal_state(net.GetSignalState(self.id))
+        #features['tls_n'] = self._map_signal_state(net.GetSignalState(next_rsu_id)) if next_rsu_id else 0
+        tls_c_state = net.GetSignalState(self.id, veh_node.id, dir_flag=dir_flag)
+        features['tls_c'] = self._map_signal_state(tls_c_state)
+        tls_n_state = net.GetSignalState(next_rsu_id, veh_node.id) if next_rsu_id else 0.0
+        features['tls_n'] = self._map_signal_state(tls_n_state)
         # Time to next signal change
         features['tlt_c'] = net.GetSignalChangeTime(self.id)
         features['tlt_n'] = net.GetSignalChangeTime(next_rsu_id) if next_rsu_id else 0.0
@@ -317,6 +341,6 @@ class RSUNode(net.Node):
 
 ###################################### Simulation Entry ######################################
 if __name__ == "__main__":
-    net.InitSumoNetSim(VehicleClass=VehicleNode, RSUClass=RSUNode)
+    net.InitSumoNetSim(VehicleClass=VehicleNode, RSUClass=RSUNode, mode = 1)
     netsim = net.SumoNetSim(VehicleClass=VehicleNode, RSUClass=RSUNode, start_message_fn=start_message)
     netsim.run()
